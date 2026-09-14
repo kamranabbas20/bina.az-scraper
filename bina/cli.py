@@ -8,7 +8,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .fetch import FetchConfig
+from .fetch import Fetcher, FetchConfig
 from .parse import parse_detail_page, parse_listing_page
 from .report import build_report, write_report
 from .scrape import DEFAULT_SECTION, ScrapeOptions, run_scrape
@@ -40,6 +40,8 @@ def main(argv=None) -> int:
         return _cmd_inspect(args)
     if args.command == "demo":
         return _cmd_demo(args)
+    if args.command == "probe":
+        return _cmd_probe(args)
 
     parser.print_help()
     return 1
@@ -131,6 +133,88 @@ def _cmd_inspect(args) -> int:
             f"{(listing.rooms and f'{listing.rooms}r') or '?r':3} "
             f"{listing.location_raw or '?'}"
         )
+    return 0
+
+
+def _cmd_probe(args) -> int:
+    """Report what a live URL actually returns.
+
+    The point of failure that matters is "the page loaded but held no
+    listings", and the only way to tell a client-rendered page from a moved
+    path from an anti-bot interstitial is to look at what came back. This
+    prints that to stdout so it survives in a CI log.
+    """
+    import re
+    from collections import Counter
+    from urllib.parse import urlparse
+
+    from . import patterns as P
+    from .fetch import FetchError
+    from .minidom import parse_html
+
+    agent = args.user_agent or FetchConfig.user_agent
+    fetcher = Fetcher(FetchConfig(delay=0.0, obey_robots=False, user_agent=agent))
+    parts = urlparse(args.url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+
+    print(f"== robots.txt  {origin}/robots.txt")
+    try:
+        for line in fetcher.get(f"{origin}/robots.txt").splitlines()[:30]:
+            print("   ", line)
+    except FetchError as exc:
+        print("    unavailable:", exc)
+    allowed = Fetcher(FetchConfig(delay=0.0, obey_robots=True, user_agent=agent)).allowed(args.url)
+    print(f"    allows this path for our User-Agent: {allowed}")
+
+    print(f"\n== GET {args.url}")
+    try:
+        markup = fetcher.get(args.url)
+    except FetchError as exc:
+        print("    failed:", exc)
+        return 1
+
+    root = parse_html(markup)
+    title = root.find(tag="title")
+    anchors = root.find_all(tag="a")
+    item_links = [a for a in anchors if P.ITEM_HREF.search(a.get("href") or "")]
+    body = root.find(tag="body") or root
+
+    print(f"    bytes: {len(markup)}")
+    print(f"    title: {title.text() if title else '(none)'}")
+    print(f"    anchors: {len(anchors)}   /items/<id> links: {len(item_links)}")
+    print(f"    <script> tags: {len(root.find_all(tag='script'))}")
+    print(f"    visible text: {len(body.text())} chars")
+
+    markers = (
+        "cloudflare",
+        "captcha",
+        "turnstile",
+        "just a moment",
+        "enable javascript",
+        "__next_data__",
+        "data-react",
+        "ng-app",
+        "vue",
+    )
+    found = [m for m in markers if m in markup.lower()]
+    print(f"    markers present: {', '.join(found) if found else 'none'}")
+
+    # The histogram is the useful part: if listings moved to another path,
+    # their new shape shows up here as the most common repeated link.
+    shapes = Counter(
+        re.sub(r"\d+", "<n>", (a.get("href") or "").split("?")[0]) for a in anchors
+    )
+    shapes.pop("", None)
+    print("    most common link shapes:")
+    for shape, count in shapes.most_common(15):
+        print(f"      {count:4}  {shape[:100]}")
+
+    print("\n== first 2000 characters of visible text")
+    print(body.text()[:2000])
+
+    print("\n== first 40 lines of HTML")
+    for line in markup.splitlines()[:40]:
+        print("   ", line[:200])
     return 0
 
 
@@ -293,6 +377,13 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--kind", choices=("list", "detail"), default="list")
     inspect.add_argument("--base-url", default="https://bina.az")
     inspect.add_argument("--limit", type=int, default=20)
+
+    probe = sub.add_parser(
+        "probe", help="report what a live URL actually returns (diagnose a failing scrape)"
+    )
+    probe.add_argument("url")
+    probe.add_argument("--user-agent")
+    probe.add_argument("--ignore-robots", action="store_true", help=argparse.SUPPRESS)
 
     demo = sub.add_parser("demo", help="build a report from synthetic data (layout check)")
     demo.add_argument("--out", default="report/demo-report.html")

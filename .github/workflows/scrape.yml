@@ -92,8 +92,21 @@ jobs:
             --days "$DAYS" \
             --csv "data/listings.csv" \
             --report "report/bina-report.html" \
+            --dump-dir dumps \
             | tee scrape.log
           exit "${PIPESTATUS[0]}"
+
+      # When a scrape comes back empty the question is always the same: did the
+      # page load, and what was in it? Printing that to the job log means the
+      # answer is readable without downloading the artifact.
+      - name: Diagnose an empty scrape
+        if: failure() && steps.scrape.conclusion == 'failure'
+        env:
+          SECTION: ${{ inputs.section || 'alqi-satqi' }}
+        run: |
+          python -m bina probe "https://bina.az/${SECTION}?page=1" || true
+          echo "--- pages saved for inspection ---"
+          ls -la dumps/ 2>/dev/null || echo "(no dumps written)"
 
       - name: Summarise the run
         if: always()
@@ -114,6 +127,7 @@ jobs:
           path: |
             data/
             report/
+            dumps/
             scrape.log
           if-no-files-found: warn
           retention-days: 30

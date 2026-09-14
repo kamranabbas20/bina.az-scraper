@@ -215,6 +215,24 @@ class EndToEndTests(unittest.TestCase):
         self.assertEqual(summary.pages_fetched, 0)
         self.assertTrue(any("robots.txt" in warning for warning in summary.warnings))
 
+    def test_probe_describes_a_live_page(self):
+        import contextlib
+        import io
+
+        from bina.cli import main
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = main(["probe", f"{self.base_url}/alqi-satqi?page=1"])
+        output = buffer.getvalue()
+
+        self.assertEqual(code, 0)
+        self.assertIn("robots.txt", output)
+        self.assertIn("allows this path for our User-Agent: True", output)
+        self.assertIn(f"/items/<id> links: {CARDS_PER_PAGE}", output)
+        self.assertIn("most common link shapes", output)
+        self.assertIn("/items/<n>", output)
+
     def test_the_report_builds_from_the_scraped_rows(self):
         run_scrape(self.store, self.options())
         html = build_report(
