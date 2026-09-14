@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+
+# Scraped data and generated output
+data/
+report/
+dumps/
+*.sqlite3
+*.csv
