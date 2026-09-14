@@ -22,6 +22,11 @@ DEFAULT_DAYS = 365
 # instead of quietly publishing a stale report.
 EXIT_NOTHING_SCRAPED = 2
 
+# `doctor` distinguishes its failures: the site refused us, or it served a page
+# this parser no longer understands. They need completely different fixes.
+EXIT_REFUSED = 2
+EXIT_PARSE_MISMATCH = 3
+
 
 def main(argv=None) -> int:
     parser = _build_parser()
@@ -42,6 +47,8 @@ def main(argv=None) -> int:
         return _cmd_demo(args)
     if args.command == "probe":
         return _cmd_probe(args)
+    if args.command == "doctor":
+        return _cmd_doctor(args)
 
     parser.print_help()
     return 1
@@ -218,6 +225,120 @@ def _cmd_probe(args) -> int:
     return 0
 
 
+def _cmd_doctor(args) -> int:
+    """Check, in one command, whether a real scrape will work from here.
+
+    Three things have to hold, and each fails differently: the site has to
+    serve this machine, the results page has to contain listing cards this
+    parser recognises, and a detail page has to yield a posting date. This
+    checks them in order and says what to do about whichever one breaks.
+    """
+    from .fetch import FetchError
+    from .parse import looks_like_block_page, parse_detail_page, parse_listing_page
+
+    options = ScrapeOptions(
+        base_url=args.base_url,
+        section=args.section,
+        fetch=FetchConfig(
+            delay=0.0,
+            obey_robots=not args.ignore_robots,
+            user_agent=args.user_agent or FetchConfig.user_agent,
+            # A diagnostic should answer quickly. A real scrape retries four
+            # times with backoff; here a second attempt is enough to rule out
+            # a one-off blip, and waiting 15s to be told "refused" is worse
+            # than being told it now.
+            max_retries=1,
+        ),
+    )
+    fetcher = Fetcher(options.fetch)
+    dumps = Path(args.dump_dir)
+    url = options.page_url(1)
+
+    # 1. Can we reach it at all?
+    print(f"1/3  fetching {url}")
+    try:
+        markup = fetcher.get(url)
+    except FetchError as exc:
+        print(f"     FAILED: {exc}\n", file=sys.stderr)
+        print(
+            "     The site refused this machine. That is where a scrape stops, and no\n"
+            "     amount of parser work changes it. bina.az is known to answer 403 to\n"
+            "     cloud/datacenter IP ranges — run this from an ordinary connection, or\n"
+            "     see the README section 'Where you can run this from'.\n"
+            "     For the full response detail:  python -m bina probe " + url,
+            file=sys.stderr,
+        )
+        return EXIT_REFUSED
+
+    dumps.mkdir(parents=True, exist_ok=True)
+    listing_dump = dumps / f"doctor-{options.section}-p1.html"
+    listing_dump.write_text(markup, encoding="utf-8")
+    print(f"     ok — {len(markup)} bytes, saved to {listing_dump}")
+
+    if looks_like_block_page(markup):
+        print(
+            "\n     FAILED: that looks like an anti-bot interstitial, not results.",
+            file=sys.stderr,
+        )
+        return EXIT_REFUSED
+
+    # 2. Does the parser recognise the cards?
+    print("2/3  parsing the results page")
+    listings, report = parse_listing_page(markup, options.base_url, page=1)
+    print(f"     cards found: {report.cards_found}")
+    for name, ratio in report.coverage().items():
+        mark = "ok  " if ratio >= 0.8 else "WEAK"
+        print(f"     {mark} {name:9} parsed on {ratio:.0%} of cards")
+
+    if not listings:
+        print(
+            f"\n     FAILED: no listings recognised on that page.\n"
+            f"     The page loaded, so this is a markup change, not a block. Look at\n"
+            f"     {listing_dump} and adjust bina/patterns.py — the link shape histogram\n"
+            f"     in `python -m bina probe {url}` usually shows what moved.",
+            file=sys.stderr,
+        )
+        return EXIT_PARSE_MISMATCH
+
+    # 3. Does a detail page give us a date? Without one there is no date range.
+    sample = listings[0]
+    detail_url = options.detail_url(sample.listing_id)
+    print(f"3/3  fetching one detail page for a posting date: {detail_url}")
+    try:
+        detail_markup = fetcher.get(detail_url)
+    except FetchError as exc:
+        print(f"     FAILED: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+
+    detail_dump = dumps / f"doctor-item-{sample.listing_id}.html"
+    detail_dump.write_text(detail_markup, encoding="utf-8")
+    detail = parse_detail_page(detail_markup, sample.listing_id, options.base_url)
+
+    if detail.posted_at:
+        print(f"     ok — posted {detail.posted_at} (from the '{detail.date_source}' label)")
+    else:
+        print(
+            f"     WEAK: no posting date found in {detail_dump}.\n"
+            f"     Everything else still works, but there is no date range without it —\n"
+            f"     scrape with --no-details, or add the date label to\n"
+            f"     bina/patterns.py (CREATED_LABELS / UPDATED_LABELS).",
+            file=sys.stderr,
+        )
+
+    weak = [name for name, ratio in report.coverage().items() if ratio < 0.8]
+    print("\nVERDICT")
+    if weak:
+        print(f"  Partly working: {', '.join(weak)} did not parse on most cards.")
+        print(f"  Check {listing_dump} against bina/patterns.py before trusting a report.")
+    else:
+        print("  Working. The scraper reads this site correctly from this machine.")
+
+    print("\nNext:")
+    print(f"  python -m bina scrape --section {options.section} --pages 40 --report")
+    print("  then open report/bina-report.html")
+    return 0
+
+
 def _cmd_demo(args) -> int:
     """Generate a report from synthetic rows, to check the output layout."""
     from .demo import synthetic_listings
@@ -377,6 +498,16 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--kind", choices=("list", "detail"), default="list")
     inspect.add_argument("--base-url", default="https://bina.az")
     inspect.add_argument("--limit", type=int, default=20)
+
+    doctor = sub.add_parser(
+        "doctor",
+        help="check in one command whether a real scrape will work from this machine",
+    )
+    doctor.add_argument("--base-url", default="https://bina.az")
+    doctor.add_argument("--section", default=DEFAULT_SECTION)
+    doctor.add_argument("--dump-dir", default="dumps")
+    doctor.add_argument("--user-agent")
+    doctor.add_argument("--ignore-robots", action="store_true", help=argparse.SUPPRESS)
 
     probe = sub.add_parser(
         "probe", help="report what a live URL actually returns (diagnose a failing scrape)"

@@ -90,6 +90,11 @@ class FakeBinaHandler(BaseHTTPRequestHandler):
             )
             return self._send(f"<html><body><div class='products'>{cards}</div></body></html>")
 
+        # A valid page that simply holds no listing links — the shape a markup
+        # change takes, as distinct from a refusal.
+        if parsed.path == "/empty-section":
+            return self._send("<html><body><div class='products'><p>Nothing</p></div></body></html>")
+
         if parsed.path.startswith("/items/"):
             listing_id = int(parsed.path.rsplit("/", 1)[1])
             return self._send(DETAIL.format(**listing_values(listing_id)))
@@ -232,6 +237,67 @@ class EndToEndTests(unittest.TestCase):
         self.assertIn(f"/items/<id> links: {CARDS_PER_PAGE}", output)
         self.assertIn("most common link shapes", output)
         self.assertIn("/items/<n>", output)
+
+    def _run_cli(self, argv) -> tuple[int, str, str]:
+        import contextlib
+        import io
+
+        from bina.cli import main
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_doctor_passes_against_a_working_site(self):
+        code, out, _ = self._run_cli(
+            ["doctor", "--base-url", self.base_url, "--dump-dir", f"{self.tmp.name}/dumps"]
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"cards found: {CARDS_PER_PAGE}", out)
+        self.assertIn("Working.", out)
+        # It must check a detail page too: without a date there is no date range.
+        self.assertIn("posted 2026-", out)
+        self.assertIn("python -m bina scrape", out)
+
+    def test_doctor_saves_the_pages_it_checked(self):
+        dumps = Path(self.tmp.name) / "dumps"
+        self._run_cli(["doctor", "--base-url", self.base_url, "--dump-dir", str(dumps)])
+        saved = sorted(p.name for p in dumps.iterdir())
+        self.assertTrue(any(name.startswith("doctor-alqi-satqi-p1") for name in saved), saved)
+        self.assertTrue(any(name.startswith("doctor-item-") for name in saved), saved)
+
+    def test_doctor_reports_a_refusal_distinctly(self):
+        # Nothing is listening on this port, so the fetch fails outright.
+        code, _, err = self._run_cli(
+            [
+                "doctor",
+                "--base-url",
+                "http://127.0.0.1:9",
+                "--dump-dir",
+                f"{self.tmp.name}/dumps",
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("refused this machine", err)
+        self.assertNotIn("markup change", err)
+
+    def test_doctor_reports_a_markup_change_distinctly(self):
+        # /kiraye is served as a valid page with no listing links at all.
+        code, _, err = self._run_cli(
+            [
+                "doctor",
+                "--base-url",
+                self.base_url,
+                "--section",
+                "empty-section",
+                "--dump-dir",
+                f"{self.tmp.name}/dumps",
+            ]
+        )
+        self.assertEqual(code, 3)
+        self.assertIn("no listings recognised", err)
+        self.assertIn("markup change, not a block", err)
 
     def test_the_report_builds_from_the_scraped_rows(self):
         run_scrape(self.store, self.options())

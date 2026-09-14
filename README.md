@@ -6,9 +6,32 @@ and builds a standalone **HTML report** over a date range (default: the last 365
 No third-party packages. Python 3.9+ and the standard library only.
 
 ```bash
+python -m bina doctor                            # start here: can this machine scrape the site?
 python -m bina scrape --pages 40 --report        # crawl, then write report/bina-report.html
 python -m bina report --since 2025-09-14         # rebuild the report from what is stored
 python -m bina demo                              # see the report layout with synthetic data
+```
+
+**Run `doctor` first.** It checks the three things that have to hold — the site serves
+this machine, the results page contains cards this parser recognises, and a detail page
+yields a posting date — and tells you which one broke and what to do about it. It exits
+`2` if the site refused you and `3` if the markup changed, because those need completely
+different fixes. It makes three requests and saves the pages it looked at.
+
+```
+1/3  fetching https://bina.az/alqi-satqi?page=1
+     ok — 148213 bytes, saved to dumps/doctor-alqi-satqi-p1.html
+2/3  parsing the results page
+     cards found: 24
+     ok   price     parsed on 100% of cards
+     ok   area      parsed on 100% of cards
+     ok   rooms     parsed on 100% of cards
+     ok   location  parsed on 96% of cards
+3/3  fetching one detail page for a posting date: https://bina.az/items/4612345
+     ok — posted 2026-03-03 (from the 'created' label)
+
+VERDICT
+  Working. The scraper reads this site correctly from this machine.
 ```
 
 ## Read this before you trust the numbers
@@ -73,18 +96,22 @@ Rebuilds `report/bina-report.html` from the database without touching the networ
 `--include-undated` adds listings that have no posting date (they are excluded by
 default, since they cannot be placed in time). `--title` sets the heading.
 
-### `inspect`
+### `doctor`, `probe`, `inspect`
 
-The debugging tool for when bina.az changes its markup:
+Three levels of diagnosis. `doctor` gives a verdict, `probe` shows what a URL returned,
+`inspect` shows what the parser made of a saved page:
 
 ```bash
-python -m bina scrape --pages 1 --no-details --dump-dir dumps
-python -m bina inspect dumps/list-alqi-satqi-p1.html
-python -m bina inspect dumps/item-4612345.html --kind detail
+python -m bina doctor                               # verdict + what to do next
+python -m bina probe "https://bina.az/alqi-satqi?page=1"   # what the URL actually returned
+python -m bina inspect dumps/doctor-alqi-satqi-p1.html     # what the parser extracted
+python -m bina inspect dumps/doctor-item-4612345.html --kind detail
 ```
 
-It prints per-field coverage ("area parsed on 34% of cards") and the parsed rows, so you
-can see exactly which field broke.
+`inspect` prints per-field coverage ("area parsed on 34% of cards") and the parsed rows,
+so you can see exactly which field broke. `probe` prints robots.txt, the response size and
+title, anti-bot and client-side-framework markers, and a histogram of link shapes — that
+last one is what reveals a listing path that moved.
 
 ## Where you can run this from
 
