@@ -18,6 +18,10 @@ DEFAULT_DB = "data/bina.sqlite3"
 DEFAULT_REPORT = "report/bina-report.html"
 DEFAULT_DAYS = 365
 
+# Exit code for "the run collected nothing", so an automated run fails loudly
+# instead of quietly publishing a stale report.
+EXIT_NOTHING_SCRAPED = 2
+
 
 def main(argv=None) -> int:
     parser = _build_parser()
@@ -79,7 +83,15 @@ def _cmd_scrape(args) -> int:
         _write(store, args.report, since, until, args)
 
     store.close()
-    return 0
+
+    code = _scrape_exit_code(summary)
+    if code:
+        print(
+            "\nERROR: this run collected nothing. Either the site refused us or the "
+            "card markup changed — re-run with --dump-dir and use `inspect`.",
+            file=sys.stderr,
+        )
+    return code
 
 
 def _cmd_report(args) -> int:
@@ -162,6 +174,22 @@ def _write(store: Store, out: str, since, until, args) -> None:
     )
     path = write_report(out, html_text)
     print(f"report written      {path}")
+
+
+def _scrape_exit_code(summary) -> int:
+    """Non-zero when a run collected nothing, so CI fails loudly.
+
+    A resumed run that had no pages left to fetch is a legitimate no-op and
+    stays at 0; being blocked, refused by robots.txt, or fetching pages that
+    yielded no cards is not.
+    """
+    if summary.stopped_because in {"blocked", "robots.txt"}:
+        return EXIT_NOTHING_SCRAPED
+    if summary.stopped_because.startswith("fetch failed") and not summary.cards_seen:
+        return EXIT_NOTHING_SCRAPED
+    if summary.pages_fetched and not summary.cards_seen:
+        return EXIT_NOTHING_SCRAPED
+    return 0
 
 
 def _date_range(args) -> tuple[dt.date, dt.date]:

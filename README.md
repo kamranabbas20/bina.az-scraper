@@ -24,6 +24,13 @@ That makes the data legitimate for questions like *what is on the market now, an
 does it cost by district and size*, and misleading for questions like *how did Baku
 prices move last year*. The report states this on the page itself.
 
+**You can build the archive the site lacks, though.** The database is keyed on listing
+ID and never deletes, so every run adds listings the last one did not see and keeps the
+ones that have since disappeared. Run it on a schedule (see
+[Running it on GitHub Actions](#running-it-on-github-actions)) and after a few months you
+own a genuine time series — including the listings bina.az has dropped. That history
+starts the day you start collecting; it cannot be backfilled.
+
 Two further limits worth keeping in mind:
 
 - Prices are **asking prices**, not transaction prices.
@@ -79,6 +86,39 @@ python -m bina inspect dumps/item-4612345.html --kind detail
 It prints per-field coverage ("area parsed on 34% of cards") and the parsed rows, so you
 can see exactly which field broke.
 
+## Running it on GitHub Actions
+
+`.github/workflows/scrape.yml` runs the scraper on a GitHub runner, which is useful when
+the machine you develop on cannot reach bina.az (a restricted network policy, a locked-down
+container) — and it is how you accumulate history without leaving a laptop running.
+
+Each run restores the database the previous run produced, scrapes on top of it, and pushes
+the result back to a `scraped-data` branch that holds only data:
+
+```
+scraped-data
+├── data/bina.sqlite3        # the full accumulated database
+├── data/listings.csv
+└── report/bina-report.html
+```
+
+The same files are attached to every run as a downloadable artifact (kept 30 days), so
+you do not need to check the branch out to look at them.
+
+- **Run it now:** Actions → *Scrape bina.az* → *Run workflow*. The inputs (section, pages,
+  delay, detail limit, reporting window) are all overridable per run.
+- **On a schedule:** daily at 03:20 UTC. GitHub disables scheduled workflows after 60 days
+  with no repository activity; re-enable from the Actions tab if that happens.
+- **Getting the data out:** `git fetch origin scraped-data && git checkout scraped-data`,
+  or download the run artifact.
+
+The workflow runs the test suite before scraping and **fails loudly** if a run collects
+nothing — `scrape` exits non-zero when it is blocked, refused by robots.txt, or fetches
+pages that yield no cards — so a parser break shows up as a red run rather than a stale
+report. Note that bina.az may treat cloud IP ranges differently from a home connection; if
+the run reports an anti-bot interstitial, that is what happened, and running locally is the
+fallback.
+
 ## Output
 
 - `data/bina.sqlite3` — `listings`, plus `pages` and `runs` for resume and audit.
@@ -122,4 +162,8 @@ python -m unittest discover -s tests -t .
 
 The parser tests run against fixture pages in `tests/fixtures/`, which mirror bina.az's
 card and detail markup (including a duplicate VIP card, a comma decimal, the `₼` sign,
-and an alternative card layout). They do not hit the network.
+and an alternative card layout).
+
+`tests/test_integration.py` runs the whole pipeline — fetch, robots.txt, pagination,
+resume, the detail pass and the report — against a local HTTP server standing in for
+bina.az. Nothing in the suite touches the public internet.

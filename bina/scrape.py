@@ -125,7 +125,14 @@ def run_scrape(store: Store, options: ScrapeOptions) -> ScrapeSummary:
         listings, report = parse_listing_page(markup, options.base_url, page)
         summary.pages_fetched += 1
         summary.cards_seen += len(listings)
-        summary.warnings.extend(f"page {page}: {note}" for note in report.notes)
+
+        # Running off the end of the results is normal, and the parser cannot
+        # tell that from a page it failed to read. Only surface its notes for
+        # pages that had cards, or for the very first page — otherwise every
+        # run ends with false "looks like a block page" warnings, which is
+        # exactly the noise that would hide a real one.
+        if listings or summary.pages_fetched == 1:
+            summary.warnings.extend(f"page {page}: {note}" for note in report.notes)
 
         store.upsert_listings(listings)
         store.record_page(options.section, page, len(listings))
