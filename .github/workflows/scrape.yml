@@ -1,19 +1,13 @@
 name: Scrape bina.az
 
-# Runs the scraper on a GitHub runner, which has the outbound network access a
-# restricted development environment may not. Each run restores the database
-# produced by the previous run, adds to it, and pushes it back to the
-# `scraped-data` branch — so repeated runs accumulate the listing history that
-# bina.az itself does not keep.
+# Each run restores the database produced by the previous run, adds to it, and
+# pushes it back to the `scraped-data` branch — so repeated runs accumulate the
+# listing history that bina.az itself does not keep.
+#
+# Read the runs-on note below first: GitHub-hosted runners are blocked by the
+# site, so this needs a self-hosted runner to collect anything.
 
 on:
-  # TEMPORARY: proves the scraper works against the live site from a runner,
-  # before this is merged. `workflow_dispatch` below only becomes available
-  # once this file is on the default branch. Remove this trigger after the
-  # first green run.
-  push:
-    branches: [claude/new-session-d8bvrk]
-    paths: [".github/workflows/scrape.yml", "bina/**"]
   workflow_dispatch:
     inputs:
       section:
@@ -47,7 +41,12 @@ permissions:
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest
+    # bina.az answers 403 to GitHub-hosted runners — every request, robots.txt
+    # included — so a hosted run cannot collect anything. Point this at a
+    # self-hosted runner on a connection the site serves by setting the
+    # repository variable SCRAPE_RUNNER (Settings -> Secrets and variables ->
+    # Actions -> Variables) to that runner's label, e.g. "self-hosted".
+    runs-on: ${{ vars.SCRAPE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 60
 
     steps:

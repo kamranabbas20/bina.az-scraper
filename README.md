@@ -86,11 +86,47 @@ python -m bina inspect dumps/item-4612345.html --kind detail
 It prints per-field coverage ("area parsed on 34% of cards") and the parsed rows, so you
 can see exactly which field broke.
 
+## Where you can run this from
+
+**bina.az blocks cloud IP ranges.** Verified on GitHub-hosted runners on
+2026-09-14: every request returns `403`, `robots.txt` included. The first run got an
+empty `200`, the next a flat `403` — the shape of an IP-range block hardening, not a
+User-Agent filter (a UA filter would not gate `robots.txt`).
+
+So:
+
+| Where | Works | Notes |
+|---|---|---|
+| Your own machine | Expected to | The site serves normal connections; this is the default path |
+| Self-hosted Actions runner | Expected to | Keeps the scheduled accumulation; see below |
+| GitHub-hosted runner | **No** | 403 on everything |
+
+This scraper does not ship User-Agent spoofing, header mimicry, proxy rotation or any
+other means of getting past that block, and adding them is out of scope. It identifies
+itself honestly and obeys `robots.txt`; if a host refuses it, the answer is to run from
+somewhere the host is willing to serve, or to ask them for access.
+
+`--user-agent` exists so you can identify *yourself* properly — the usual courtesy is a
+contact address, e.g.
+`--user-agent "bina-scraper/1.0 (+you@example.com)"` — not so you can pretend to be a
+browser.
+
 ## Running it on GitHub Actions
 
-`.github/workflows/scrape.yml` runs the scraper on a GitHub runner, which is useful when
-the machine you develop on cannot reach bina.az (a restricted network policy, a locked-down
-container) — and it is how you accumulate history without leaving a laptop running.
+`.github/workflows/scrape.yml` runs the scraper on a schedule, which is how you accumulate
+history without leaving a laptop running.
+
+**It needs a self-hosted runner** (see above — GitHub-hosted ones are refused with 403).
+[Register a runner](https://docs.github.com/en/actions/hosting-your-own-runners) on a
+machine with a connection bina.az serves, then set the repository variable
+`SCRAPE_RUNNER` to its label under *Settings → Secrets and variables → Actions →
+Variables*. The workflow reads it:
+
+```yaml
+runs-on: ${{ vars.SCRAPE_RUNNER || 'ubuntu-latest' }}
+```
+
+Nothing else changes.
 
 Each run restores the database the previous run produced, scrapes on top of it, and pushes
 the result back to a `scraped-data` branch that holds only data:
@@ -114,10 +150,10 @@ you do not need to check the branch out to look at them.
 
 The workflow runs the test suite before scraping and **fails loudly** if a run collects
 nothing — `scrape` exits non-zero when it is blocked, refused by robots.txt, or fetches
-pages that yield no cards — so a parser break shows up as a red run rather than a stale
-report. Note that bina.az may treat cloud IP ranges differently from a home connection; if
-the run reports an anti-bot interstitial, that is what happened, and running locally is the
-fallback.
+pages that yield no cards — so a break shows up as a red run rather than a stale report.
+On failure it runs `bina probe` and prints the result into the job log, which tells you
+whether the site refused you, moved the listing path, or changed its markup, without
+downloading anything.
 
 ## Output
 
