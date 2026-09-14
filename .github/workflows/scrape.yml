@@ -7,6 +7,13 @@ name: Scrape bina.az
 # bina.az itself does not keep.
 
 on:
+  # TEMPORARY: proves the scraper works against the live site from a runner,
+  # before this is merged. `workflow_dispatch` below only becomes available
+  # once this file is on the default branch. Remove this trigger after the
+  # first green run.
+  push:
+    branches: [claude/new-session-d8bvrk]
+    paths: [".github/workflows/scrape.yml", "bina/**"]
   workflow_dispatch:
     inputs:
       section:
@@ -68,10 +75,13 @@ jobs:
       - name: Scrape
         id: scrape
         env:
+          # The fallbacks apply to scheduled runs, which are incremental: the
+          # database carries over, so a modest daily slice is enough and stays
+          # polite. Use the manual inputs above for a deeper crawl.
           SECTION: ${{ inputs.section || 'alqi-satqi' }}
-          PAGES: ${{ inputs.pages || '40' }}
+          PAGES: ${{ inputs.pages || '10' }}
           DELAY: ${{ inputs.delay || '1.5' }}
-          DETAIL_LIMIT: ${{ inputs.detail_limit || '400' }}
+          DETAIL_LIMIT: ${{ inputs.detail_limit || '150' }}
           DAYS: ${{ inputs.days || '365' }}
         run: |
           python -m bina scrape \
