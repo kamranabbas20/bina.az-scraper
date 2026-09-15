@@ -1,0 +1,44 @@
+# Copy to config.yml and edit. Every key here matches a field on
+# bina_scraper.config.Settings; an unknown key is an error, not a no-op.
+
+# --- what to crawl ----------------------------------------------------------
+deal_type: sale            # sale | rent | rent_daily
+# search_path: /alqi-satqi/menziller   # set this to override deal_type entirely
+
+# Filters appended to the search URL. Open the filtered search in a browser and
+# copy its query string here — bina.az's parameter names are not stable enough
+# to hardcode.
+query_params: {}
+#   where: baku
+#   room_ids[]: 3
+
+start_page: 1
+max_pages: 5
+max_items: null            # stop after this many new records
+fetch_details: true        # false = card fields only, one request per page
+
+# --- transport --------------------------------------------------------------
+fetcher: http              # http | browser (browser needs Playwright)
+contact_email: null        # goes into the User-Agent; set it
+timeout: 30
+proxy: null                # e.g. http://127.0.0.1:8080
+
+# --- politeness -------------------------------------------------------------
+delay: 2.0                 # seconds between requests
+jitter: 1.0                # plus up to this many extra seconds
+max_retries: 3
+backoff_factor: 2.0
+respect_robots: true
+
+# --- output -----------------------------------------------------------------
+output: data/listings.jsonl
+resume: true               # skip item ids already present in the output file
+save_html_dir: null        # keep raw HTML here too, for selector repair
+
+# --- browser fetcher only ---------------------------------------------------
+headless: true
+browser_executable: null   # path to a Chromium build, if not the bundled one
+browser_wait_selector: null
+browser_wait_ms: 1500
+
+log_level: INFO
