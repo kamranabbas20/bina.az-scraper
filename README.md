@@ -8,6 +8,7 @@ No third-party packages. Python 3.9+ and the standard library only.
 ```bash
 python -m bina doctor                            # start here: can this machine scrape the site?
 python -m bina scrape --pages 40 --report        # crawl, then write report/bina-report.html
+python -m bina ingest saved-pages/ --report      # same pipeline, from saved HTML, no network
 python -m bina report --since 2025-09-14         # rebuild the report from what is stored
 python -m bina demo                              # see the report layout with synthetic data
 ```
@@ -132,6 +133,25 @@ This scraper does not ship User-Agent spoofing, header mimicry, proxy rotation o
 other means of getting past that block, and adding them is out of scope. It identifies
 itself honestly and obeys `robots.txt`; if a host refuses it, the answer is to run from
 somewhere the host is willing to serve, or to ask them for access.
+
+### No network at all? Use `ingest`
+
+Only the fetching half needs to reach bina.az. Hand `ingest` HTML files saved anywhere —
+your browser's *Save page as*, or a `--dump-dir` from a machine that does have access —
+and the parser, database and report work exactly as they would on a live crawl:
+
+```bash
+python -m bina ingest saved-pages/ --report
+```
+
+It sorts results pages from detail pages by what is in them, merges the two into one row
+per listing (a detail page read before its results page still keeps its date), recovers a
+listing id from the filename when a saved page has lost its canonical link, and counts
+anything it could not parse. Re-running over the same files changes nothing.
+
+This is also how to debug the parser from a machine that cannot reach the site: save one
+real results page, `ingest` it, and the coverage numbers tell you whether the selectors
+still match.
 
 `--user-agent` exists so you can identify *yourself* properly — the usual courtesy is a
 contact address, e.g.

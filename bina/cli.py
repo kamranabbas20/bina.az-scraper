@@ -49,6 +49,8 @@ def main(argv=None) -> int:
         return _cmd_probe(args)
     if args.command == "doctor":
         return _cmd_doctor(args)
+    if args.command == "ingest":
+        return _cmd_ingest(args)
 
     parser.print_help()
     return 1
@@ -140,6 +142,94 @@ def _cmd_inspect(args) -> int:
             f"{(listing.rooms and f'{listing.rooms}r') or '?r':3} "
             f"{listing.location_raw or '?'}"
         )
+    return 0
+
+
+def _cmd_ingest(args) -> int:
+    """Load listings from HTML files already on disk, with no network at all.
+
+    The fetching half is the only part that needs to reach bina.az. When a
+    machine cannot — a restricted network, a blocked IP range — pages saved
+    from a browser (or by ``--dump-dir`` elsewhere) still go through the
+    parser, the database and the report exactly as a live crawl would.
+    """
+    import re
+
+    paths: list[Path] = []
+    for raw in args.paths:
+        path = Path(raw)
+        if path.is_dir():
+            paths.extend(
+                sorted(p for p in path.rglob("*") if p.suffix.lower() in {".html", ".htm"})
+            )
+        elif path.exists():
+            paths.append(path)
+        else:
+            print(f"skipping {path}: not found", file=sys.stderr)
+
+    if not paths:
+        print("no HTML files found to ingest", file=sys.stderr)
+        return EXIT_NOTHING_SCRAPED
+
+    store = Store(args.db)
+    listing_pages = detail_pages = unrecognised = 0
+    cards = dated = 0
+
+    for path in paths:
+        markup = path.read_text(encoding="utf-8", errors="replace")
+
+        listings, _ = parse_listing_page(markup, args.base_url)
+        if listings:
+            listing_pages += 1
+            cards += len(listings)
+            store.upsert_listings(listings)
+            print(f"  {path.name}: {len(listings)} listings")
+            continue
+
+        # Not a results page — try it as a detail page. A file saved from a
+        # browser may have lost the canonical link, so fall back to an id in
+        # the filename (dump-dir writes item-<id>.html).
+        fallback_id = ""
+        match = re.search(r"(\d{5,})", path.stem)
+        if match:
+            fallback_id = match.group(1)
+
+        detail = parse_detail_page(markup, fallback_id, args.base_url)
+        if detail.listing_id and (detail.price or detail.area or detail.posted_at):
+            detail_pages += 1
+            dated += detail.posted_at is not None
+            store.upsert_listings([detail])
+            when = f"posted {detail.posted_at}" if detail.posted_at else "no date found"
+            print(f"  {path.name}: detail for {detail.listing_id}, {when}")
+            continue
+
+        unrecognised += 1
+        print(f"  {path.name}: nothing recognised", file=sys.stderr)
+
+    print(
+        f"\nfiles read         {len(paths)}"
+        f"\nresults pages      {listing_pages} ({cards} cards)"
+        f"\ndetail pages       {detail_pages} ({dated} yielded a date)"
+        f"\nunrecognised       {unrecognised}"
+        f"\nlistings stored    {store.count()}"
+    )
+
+    since, until = _date_range(args)
+    if args.csv:
+        rows = export_csv(store.iter_listings(since, until, args.include_undated), args.csv)
+        print(f"csv written        {args.csv} ({rows} rows)")
+    if args.report:
+        _write(store, args.report, since, until, args)
+
+    store.close()
+
+    if not listing_pages and not detail_pages:
+        print(
+            "\nERROR: none of those files parsed. Run "
+            "`python -m bina inspect <file>` to see what the parser made of one.",
+            file=sys.stderr,
+        )
+        return EXIT_PARSE_MISMATCH
     return 0
 
 
@@ -498,6 +588,20 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--kind", choices=("list", "detail"), default="list")
     inspect.add_argument("--base-url", default="https://bina.az")
     inspect.add_argument("--limit", type=int, default=20)
+
+    ingest = sub.add_parser(
+        "ingest",
+        help="load listings from saved HTML files, with no network access at all",
+    )
+    ingest.add_argument("paths", nargs="+", metavar="PATH", help="HTML files or directories")
+    ingest.add_argument("--db", default=DEFAULT_DB)
+    ingest.add_argument("--base-url", default="https://bina.az")
+    ingest.add_argument("--csv")
+    ingest.add_argument("--report", nargs="?", const=DEFAULT_REPORT)
+    ingest.add_argument("--include-undated", action="store_true")
+    ingest.add_argument("--currency", default="AZN")
+    ingest.add_argument("--title")
+    _add_range_args(ingest)
 
     doctor = sub.add_parser(
         "doctor",
