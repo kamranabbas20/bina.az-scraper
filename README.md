@@ -1,1 +1,252 @@
 # bina.az-scraper
+
+Collects **price, area, rooms and location** from bina.az listings into SQLite/CSV,
+and builds a standalone **HTML report** over a date range (default: the last 365 days).
+
+No third-party packages. Python 3.9+ and the standard library only.
+
+```bash
+python -m bina doctor                            # start here: can this machine scrape the site?
+python -m bina scrape --pages 40 --report        # crawl, then write report/bina-report.html
+python -m bina ingest saved-pages/ --report      # same pipeline, from saved HTML, no network
+python -m bina report --since 2025-09-14         # rebuild the report from what is stored
+python -m bina demo                              # see the report layout with synthetic data
+```
+
+**Run `doctor` first.** It checks the three things that have to hold — the site serves
+this machine, the results page contains cards this parser recognises, and a detail page
+yields a posting date — and tells you which one broke and what to do about it. It exits
+`2` if the site refused you and `3` if the markup changed, because those need completely
+different fixes. It makes three requests and saves the pages it looked at.
+
+```
+1/3  fetching https://bina.az/alqi-satqi?page=1
+     ok — 148213 bytes, saved to dumps/doctor-alqi-satqi-p1.html
+2/3  parsing the results page
+     cards found: 24
+     ok   price     parsed on 100% of cards
+     ok   area      parsed on 100% of cards
+     ok   rooms     parsed on 100% of cards
+     ok   location  parsed on 96% of cards
+3/3  fetching one detail page for a posting date: https://bina.az/items/4612345
+     ok — posted 2026-03-03 (from the 'created' label)
+
+VERDICT
+  Working. The scraper reads this site correctly from this machine.
+```
+
+## Read this before you trust the numbers
+
+**bina.az has no archive.** It publishes only listings that are currently live. There is
+no "all listings from the past year" to fetch — what this tool produces is a snapshot of
+*present inventory*, sliced by the posting date printed on each listing. Everything that
+sold, rented or expired is already gone from the site, and that gap grows the further
+back you look: a chart of "listings posted per month" will always slope down toward
+older months, because old listings survive only if nobody took them.
+
+That makes the data legitimate for questions like *what is on the market now, and what
+does it cost by district and size*, and misleading for questions like *how did Baku
+prices move last year*. The report states this on the page itself.
+
+**You can build the archive the site lacks, though.** The database is keyed on listing
+ID and never deletes, so every run adds listings the last one did not see and keeps the
+ones that have since disappeared. Run it on a schedule (see
+[Running it on GitHub Actions](#running-it-on-github-actions)) and after a few months you
+own a genuine time series — including the listings bina.az has dropped. That history
+starts the day you start collecting; it cannot be backfilled.
+
+Two further limits worth keeping in mind:
+
+- Prices are **asking prices**, not transaction prices.
+- The posting date lives on the **detail page**, not the results card, so a date-filtered
+  run costs one extra request per listing. `--no-details` skips that and gives you
+  price/area/rooms/location with no dates at all.
+
+## Commands
+
+### `scrape`
+
+```bash
+python -m bina scrape \
+  --section alqi-satqi \        # alqi-satqi = for sale, kiraye = rent
+  --pages 40 \                  # result pages to fetch
+  --delay 1.0 \                 # seconds between requests
+  --days 365 \                  # date range used for the report/CSV
+  --csv data/listings.csv \
+  --report report/bina-report.html
+```
+
+Useful flags:
+
+| Flag | What it does |
+|---|---|
+| `--query KEY=VALUE` | extra query parameters, repeatable (e.g. `--query city_id=1`) |
+| `--no-details` | skip detail pages: fast, but no posting dates |
+| `--detail-limit N` | cap detail requests per run; run again later to continue |
+| `--no-resume` | re-fetch pages already recorded in the database |
+| `--dump-dir DIR` | save every fetched page for `inspect` |
+| `--since` / `--until` / `--days` | the reporting window |
+
+Runs are **resumable**. Pages already fetched are recorded in the database and skipped,
+and listings that still have no date are picked up by the next run's detail pass, so a
+long crawl can be done in sittings.
+
+### `report`
+
+Rebuilds `report/bina-report.html` from the database without touching the network.
+`--include-undated` adds listings that have no posting date (they are excluded by
+default, since they cannot be placed in time). `--title` sets the heading.
+
+### `doctor`, `probe`, `inspect`
+
+Three levels of diagnosis. `doctor` gives a verdict, `probe` shows what a URL returned,
+`inspect` shows what the parser made of a saved page:
+
+```bash
+python -m bina doctor                               # verdict + what to do next
+python -m bina probe "https://bina.az/alqi-satqi?page=1"   # what the URL actually returned
+python -m bina inspect dumps/doctor-alqi-satqi-p1.html     # what the parser extracted
+python -m bina inspect dumps/doctor-item-4612345.html --kind detail
+```
+
+`inspect` prints per-field coverage ("area parsed on 34% of cards") and the parsed rows,
+so you can see exactly which field broke. `probe` prints robots.txt, the response size and
+title, anti-bot and client-side-framework markers, and a histogram of link shapes — that
+last one is what reveals a listing path that moved.
+
+## Where you can run this from
+
+**bina.az blocks cloud IP ranges.** Verified on GitHub-hosted runners on
+2026-09-14: every request returns `403`, `robots.txt` included. The first run got an
+empty `200`, the next a flat `403` — the shape of an IP-range block hardening, not a
+User-Agent filter (a UA filter would not gate `robots.txt`).
+
+So:
+
+| Where | Works | Notes |
+|---|---|---|
+| Your own machine | Expected to | The site serves normal connections; this is the default path |
+| Self-hosted Actions runner | Expected to | Keeps the scheduled accumulation; see below |
+| GitHub-hosted runner | **No** | 403 on everything |
+
+This scraper does not ship User-Agent spoofing, header mimicry, proxy rotation or any
+other means of getting past that block, and adding them is out of scope. It identifies
+itself honestly and obeys `robots.txt`; if a host refuses it, the answer is to run from
+somewhere the host is willing to serve, or to ask them for access.
+
+### No network at all? Use `ingest`
+
+Only the fetching half needs to reach bina.az. Hand `ingest` HTML files saved anywhere —
+your browser's *Save page as*, or a `--dump-dir` from a machine that does have access —
+and the parser, database and report work exactly as they would on a live crawl:
+
+```bash
+python -m bina ingest saved-pages/ --report
+```
+
+It sorts results pages from detail pages by what is in them, merges the two into one row
+per listing (a detail page read before its results page still keeps its date), recovers a
+listing id from the filename when a saved page has lost its canonical link, and counts
+anything it could not parse. Re-running over the same files changes nothing.
+
+This is also how to debug the parser from a machine that cannot reach the site: save one
+real results page, `ingest` it, and the coverage numbers tell you whether the selectors
+still match.
+
+`--user-agent` exists so you can identify *yourself* properly — the usual courtesy is a
+contact address, e.g.
+`--user-agent "bina-scraper/1.0 (+you@example.com)"` — not so you can pretend to be a
+browser.
+
+## Running it on GitHub Actions
+
+`.github/workflows/scrape.yml` runs the scraper on a schedule, which is how you accumulate
+history without leaving a laptop running.
+
+**It needs a self-hosted runner** (see above — GitHub-hosted ones are refused with 403).
+[Register a runner](https://docs.github.com/en/actions/hosting-your-own-runners) on a
+machine with a connection bina.az serves, then set the repository variable
+`SCRAPE_RUNNER` to its label under *Settings → Secrets and variables → Actions →
+Variables*. The workflow reads it:
+
+```yaml
+runs-on: ${{ vars.SCRAPE_RUNNER || 'ubuntu-latest' }}
+```
+
+Nothing else changes.
+
+Each run restores the database the previous run produced, scrapes on top of it, and pushes
+the result back to a `scraped-data` branch that holds only data:
+
+```
+scraped-data
+├── data/bina.sqlite3        # the full accumulated database
+├── data/listings.csv
+└── report/bina-report.html
+```
+
+The same files are attached to every run as a downloadable artifact (kept 30 days), so
+you do not need to check the branch out to look at them.
+
+- **Run it now:** Actions → *Scrape bina.az* → *Run workflow*. The inputs (section, pages,
+  delay, detail limit, reporting window) are all overridable per run.
+- **On a schedule:** daily at 03:20 UTC. GitHub disables scheduled workflows after 60 days
+  with no repository activity; re-enable from the Actions tab if that happens.
+- **Getting the data out:** `git fetch origin scraped-data && git checkout scraped-data`,
+  or download the run artifact.
+
+The workflow runs the test suite before scraping and **fails loudly** if a run collects
+nothing — `scrape` exits non-zero when it is blocked, refused by robots.txt, or fetches
+pages that yield no cards — so a break shows up as a red run rather than a stale report.
+On failure it runs `bina probe` and prints the result into the job log, which tells you
+whether the site refused you, moved the listing path, or changed its markup, without
+downloading anything.
+
+## Output
+
+- `data/bina.sqlite3` — `listings`, plus `pages` and `runs` for resume and audit.
+- CSV (with `--csv`) — one row per listing, including a computed `price_per_m2`.
+- `report/bina-report.html` — a single self-contained file: no network requests, no
+  JS libraries, works from `file://`, light and dark themes, every chart has a
+  "Show data" table underneath.
+
+The report contains: headline medians; median AZN/m² by district; listings by room
+count; listings posted per month; median AZN/m² by month; area against price by room
+count; a recent-listings table; and the caveats above.
+
+## When the site changes
+
+Everything site-specific is in two files:
+
+- `bina/patterns.py` — the text patterns (price, `3 otaq`, `85 m²`, `Nəsimi r.`, dates in
+  Azerbaijani and Russian).
+- `bina/parse.py` — how a listing card is located and read.
+
+The parsers deliberately key on **visible text** rather than CSS class names, and find
+cards via `<a href="/items/<id>">` rather than a container class, because bina.az renames
+classes far more often than it changes the words it prints. A redesign will still break
+things eventually; `inspect` tells you which part.
+
+## Being a good citizen
+
+Defaults are deliberately polite: one request per second with jitter, a real
+User-Agent, bounded retries with exponential backoff, and `robots.txt` honoured —
+including its `Crawl-delay`. If robots.txt disallows the path, the run stops and says so.
+
+Check bina.az's terms of service before running this at any scale, and keep `--delay` at
+a level that cannot affect the site. Scraping someone's site is your responsibility, not
+the tool's.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
+The parser tests run against fixture pages in `tests/fixtures/`, which mirror bina.az's
+card and detail markup (including a duplicate VIP card, a comma decimal, the `₼` sign,
+and an alternative card layout).
+
+`tests/test_integration.py` runs the whole pipeline — fetch, robots.txt, pagination,
+resume, the detail pass and the report — against a local HTTP server standing in for
+bina.az. Nothing in the suite touches the public internet.

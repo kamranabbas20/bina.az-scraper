@@ -1,0 +1,160 @@
+name: Scrape bina.az
+
+# Each run restores the database produced by the previous run, adds to it, and
+# pushes it back to the `scraped-data` branch — so repeated runs accumulate the
+# listing history that bina.az itself does not keep.
+#
+# Read the runs-on note below first: GitHub-hosted runners are blocked by the
+# site, so this needs a self-hosted runner to collect anything.
+
+on:
+  workflow_dispatch:
+    inputs:
+      section:
+        description: "Section to crawl (alqi-satqi = sale, kiraye = rent)"
+        type: choice
+        options: [alqi-satqi, kiraye]
+        default: alqi-satqi
+      pages:
+        description: "Result pages to fetch"
+        default: "40"
+      delay:
+        description: "Seconds between requests"
+        default: "1.5"
+      detail_limit:
+        description: "Max detail pages this run (these carry the posting date)"
+        default: "400"
+      days:
+        description: "Reporting window, in days back from today"
+        default: "365"
+  schedule:
+    # 03:20 UTC daily. Scheduled workflows are disabled after 60 days without
+    # repository activity; re-enable from the Actions tab if that happens.
+    - cron: "20 3 * * *"
+
+concurrency:
+  group: bina-scrape
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    # bina.az answers 403 to GitHub-hosted runners — every request, robots.txt
+    # included — so a hosted run cannot collect anything. Point this at a
+    # self-hosted runner on a connection the site serves by setting the
+    # repository variable SCRAPE_RUNNER (Settings -> Secrets and variables ->
+    # Actions -> Variables) to that runner's label, e.g. "self-hosted".
+    runs-on: ${{ vars.SCRAPE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the scraper
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore the database from the previous run
+        run: |
+          mkdir -p data report
+          if git fetch --depth=1 origin scraped-data 2>/dev/null; then
+            git checkout FETCH_HEAD -- data/bina.sqlite3 2>/dev/null \
+              && echo "restored $(du -h data/bina.sqlite3 | cut -f1) database" \
+              || echo "data branch has no database yet — starting fresh"
+          else
+            echo "no scraped-data branch yet — starting fresh"
+          fi
+
+      - name: Run the tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Scrape
+        id: scrape
+        env:
+          # The fallbacks apply to scheduled runs, which are incremental: the
+          # database carries over, so a modest daily slice is enough and stays
+          # polite. Use the manual inputs above for a deeper crawl.
+          SECTION: ${{ inputs.section || 'alqi-satqi' }}
+          PAGES: ${{ inputs.pages || '10' }}
+          DELAY: ${{ inputs.delay || '1.5' }}
+          DETAIL_LIMIT: ${{ inputs.detail_limit || '150' }}
+          DAYS: ${{ inputs.days || '365' }}
+        run: |
+          python -m bina scrape \
+            --section "$SECTION" \
+            --pages "$PAGES" \
+            --delay "$DELAY" \
+            --detail-limit "$DETAIL_LIMIT" \
+            --days "$DAYS" \
+            --csv "data/listings.csv" \
+            --report "report/bina-report.html" \
+            --dump-dir dumps \
+            | tee scrape.log
+          exit "${PIPESTATUS[0]}"
+
+      # When a scrape comes back empty the question is always the same: did the
+      # page load, and what was in it? Printing that to the job log means the
+      # answer is readable without downloading the artifact.
+      - name: Diagnose an empty scrape
+        if: failure() && steps.scrape.conclusion == 'failure'
+        env:
+          SECTION: ${{ inputs.section || 'alqi-satqi' }}
+        run: |
+          python -m bina probe "https://bina.az/${SECTION}?page=1" || true
+          echo "--- pages saved for inspection ---"
+          ls -la dumps/ 2>/dev/null || echo "(no dumps written)"
+
+      - name: Summarise the run
+        if: always()
+        run: |
+          {
+            echo '## bina.az scrape'
+            echo '```'
+            tail -n 25 scrape.log 2>/dev/null || echo 'the scrape produced no output'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Kept even on failure: a dumped page is what you need to fix the parser.
+      - name: Upload the data and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bina-data-${{ github.run_number }}
+          path: |
+            data/
+            report/
+            dumps/
+            scrape.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Describe what is stored
+        if: success()
+        id: totals
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import sqlite3
+
+          db = sqlite3.connect("data/bina.sqlite3")
+          total = db.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
+          dated = db.execute(
+              "SELECT COUNT(*) FROM listings WHERE posted_at IS NOT NULL"
+          ).fetchone()[0]
+          print(f"summary={total} listings, {dated} with a posting date")
+          PY
+
+      - name: Push the data back to the scraped-data branch
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # An orphan branch holding only data, so the code history stays clean.
+          git checkout --orphan scraped-data-new
+          git rm -rq --cached . || true
+          git add -f data/bina.sqlite3 data/listings.csv report/bina-report.html
+          git commit -q -m "Scrape ${{ github.run_number }}: ${{ steps.totals.outputs.summary }}"
+          git push -f origin scraped-data-new:scraped-data
