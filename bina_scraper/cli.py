@@ -11,9 +11,17 @@ from . import selectors as sel
 from .config import Settings, load_settings
 from .crawl import Crawler, build_search_url
 from .fetchers import FetchError, build_fetcher
+from .history import (
+    format_timeline,
+    group_by_item,
+    load_observations,
+    price_changes,
+    summarize,
+)
 from .logging_conf import configure_logging
 from .parse.detail import parse_detail
 from .parse.listing import parse_listing_page
+from .store.jsonl import MODES
 from .verify import format_report, guess_kind
 
 
@@ -46,6 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
     crawl.add_argument("--fetcher", choices=("http", "browser"), default=None)
     crawl.add_argument("--delay", type=float, default=None, help="seconds between requests")
     crawl.add_argument("-o", "--output", default=None, help="JSONL output path")
+    crawl.add_argument(
+        "--mode",
+        dest="store_mode",
+        choices=MODES,
+        default=None,
+        help=(
+            "observations: one row per listing per crawl (default); "
+            "changes: one row per listing per change; "
+            "unique: one row per listing ever, no history"
+        ),
+    )
     crawl.add_argument("--save-html-dir", default=None, help="also keep the raw HTML here")
     crawl.add_argument("--proxy", default=None)
     crawl.add_argument("--contact-email", default=None, help="goes into the User-Agent")
@@ -61,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="resume",
         action="store_false",
         default=None,
-        help="do not skip ids already in the output file",
+        help="ignore what the output file already holds",
     )
     crawl.add_argument(
         "--ignore-robots",
@@ -83,6 +102,17 @@ def build_parser() -> argparse.ArgumentParser:
     parse.add_argument("path", help="saved .html file")
     parse.add_argument("--kind", choices=("listing", "detail"), default=None)
     parse.add_argument("--url", default="https://bina.az/items/0", help="URL the file came from")
+
+    history = sub.add_parser(
+        "history", help="query an observation log: summary, timelines, price changes"
+    )
+    _add_common(history)
+    history.add_argument("path", help="JSONL file written by crawl")
+    history.add_argument("--item", default=None, help="show one listing's timeline")
+    history.add_argument(
+        "--price-changes", action="store_true", help="list every price move in the log"
+    )
+    history.add_argument("--json", action="store_true", help="emit JSON instead of text")
 
     verify = sub.add_parser(
         "verify-selectors", help="report which selectors still match a saved page"
@@ -123,6 +153,7 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
             "fetcher",
             "delay",
             "output",
+            "store_mode",
             "save_html_dir",
             "proxy",
             "contact_email",
@@ -178,6 +209,60 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_history(args: argparse.Namespace) -> int:
+    records = load_observations(args.path)
+    if not records:
+        print(f"{args.path} holds no usable observations", file=sys.stderr)
+        return 1
+
+    if args.item:
+        observations = group_by_item(records).get(str(args.item), [])
+        if not observations:
+            print(f"no observations for item {args.item}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(observations, ensure_ascii=False, indent=2))
+        else:
+            print(format_timeline(str(args.item), observations))
+        return 0
+
+    if args.price_changes:
+        changes = price_changes(records)
+        if args.json:
+            print(
+                json.dumps(
+                    [
+                        {
+                            "item_id": c.item_id,
+                            "old_price": c.old_price,
+                            "new_price": c.new_price,
+                            "currency": c.currency,
+                            "delta": c.delta,
+                            "pct": c.pct,
+                            "previous_at": c.previous_at,
+                            "observed_at": c.observed_at,
+                        }
+                        for c in changes
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        else:
+            for change in changes:
+                print(change.describe())
+            noun = "change" if len(changes) == 1 else "changes"
+            print(f"{len(changes)} price {noun}", file=sys.stderr)
+        return 0
+
+    summary = summarize(records)
+    if args.json:
+        print(json.dumps(summary.__dict__, ensure_ascii=False, indent=2))
+    else:
+        print(summary.describe())
+    return 0
+
+
 def cmd_parse(args: argparse.Namespace) -> int:
     html = Path(args.path).read_text(encoding="utf-8", errors="replace")
     kind = args.kind or guess_kind(html)
@@ -205,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
         "crawl": cmd_crawl,
         "fetch": cmd_fetch,
         "parse": cmd_parse,
+        "history": cmd_history,
         "verify-selectors": cmd_verify,
     }
     return handlers[args.command](args)

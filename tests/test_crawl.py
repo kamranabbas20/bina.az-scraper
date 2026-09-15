@@ -203,16 +203,18 @@ def test_unreadable_robots_refuses_by_default(tmp_path, listing_html):
     assert stats.pages_fetched == 0
 
 
-def test_resume_skips_previously_written_ids(tmp_path, listing_html):
+def test_unique_mode_skips_previously_written_ids(tmp_path, listing_html):
     out = tmp_path / "out.jsonl"
-    with JsonlStore(out) as store:
+    with JsonlStore(out, mode="unique") as store:
         store.write({"item_id": "4471693"})
-    settings = _settings(tmp_path, fetch_details=False, output=str(out))
+    settings = _settings(tmp_path, fetch_details=False, output=str(out), store_mode="unique")
     fetcher = FakeFetcher({"/alqi-satqi": listing_html})
     stats = Crawler(settings, fetcher=fetcher).run()
 
     assert stats.skipped_duplicates == 1
     assert stats.records_written == 1
+    # A known listing must not cost a detail request in unique mode.
+    assert "https://bina.az/items/4471693" not in fetcher.requested
 
 
 def test_save_html_dir_keeps_raw_pages(tmp_path, listing_html):
@@ -241,3 +243,64 @@ def test_block_while_reading_robots_is_reported_as_a_block(tmp_path, listing_htm
 
     assert stats.blocked is True
     assert stats.pages_fetched == 0
+
+
+# --- observation log across repeated crawls --------------------------------
+
+
+def test_second_crawl_appends_a_new_observation(tmp_path, listing_html):
+    """A re-crawl must record the new price, not skip the listing it knows."""
+    out = tmp_path / "out.jsonl"
+    settings = _settings(tmp_path, fetch_details=False, output=str(out))
+
+    first = Crawler(settings, fetcher=FakeFetcher({"/alqi-satqi": listing_html})).run()
+    assert first.records_written == 2
+
+    cheaper = listing_html.replace("185 000", "175 000")
+    second = Crawler(settings, fetcher=FakeFetcher({"/alqi-satqi": cheaper})).run()
+    assert second.records_written == 2
+    assert second.skipped_duplicates == 0
+
+    rows = _records(out)
+    assert len(rows) == 4
+    prices = [r["price"] for r in rows if r["item_id"] == "4471693"]
+    assert prices == [185000.0, 175000.0]
+
+
+def test_changes_mode_skips_an_unchanged_listing(tmp_path, listing_html):
+    out = tmp_path / "out.jsonl"
+    settings = _settings(tmp_path, fetch_details=False, output=str(out), store_mode="changes")
+
+    first = Crawler(settings, fetcher=FakeFetcher({"/alqi-satqi": listing_html})).run()
+    assert first.records_written == 2
+
+    second = Crawler(settings, fetcher=FakeFetcher({"/alqi-satqi": listing_html})).run()
+    assert second.records_written == 0
+    assert second.unchanged == 2
+    assert len(_records(out)) == 2
+
+    cheaper = listing_html.replace("185 000", "175 000")
+    third = Crawler(settings, fetcher=FakeFetcher({"/alqi-satqi": cheaper})).run()
+    assert third.records_written == 1  # only the listing whose price moved
+    assert third.unchanged == 1
+
+
+def test_records_carry_a_content_hash(tmp_path, listing_html):
+    settings = _settings(tmp_path, fetch_details=False)
+    Crawler(settings, fetcher=FakeFetcher({"/alqi-satqi": listing_html})).run()
+    rows = _records(tmp_path / "out.jsonl")
+    assert all(len(r["content_hash"]) == 32 for r in rows)
+    assert rows[0]["content_hash"] != rows[1]["content_hash"]
+
+
+def test_observation_mode_still_fetches_details_on_a_recrawl(tmp_path, listing_html, item_html):
+    """Detail pages must be re-fetched, or a price change is never seen."""
+    out = tmp_path / "out.jsonl"
+    settings = _settings(tmp_path, fetch_details=True, output=str(out))
+    pages = {"/alqi-satqi": listing_html, "/items/4471693": item_html}
+
+    Crawler(settings, fetcher=FakeFetcher(pages)).run()
+    second_fetcher = FakeFetcher(pages)
+    Crawler(settings, fetcher=second_fetcher).run()
+
+    assert "https://bina.az/items/4471693" in second_fetcher.requested

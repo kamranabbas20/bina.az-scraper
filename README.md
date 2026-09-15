@@ -76,6 +76,7 @@ python -m bina_scraper crawl --deal-type rent --param where=baku --param 'room_i
 | `crawl` | Walk search-result pages and write listings to JSONL |
 | `fetch <url>` | Fetch one item or search URL and print the parsed record |
 | `parse <file.html>` | Parse a saved HTML file — no network |
+| `history <file.jsonl>` | Query an observation log: summary, timelines, price changes |
 | `verify-selectors <file.html>` | Report which selectors still match a saved page |
 
 Exit codes: `0` success, `1` nothing written, `2` blocked or fetch failure.
@@ -170,9 +171,66 @@ Notes on the shape:
   the run date, so they are only meaningful because `scraped_at` is recorded
   alongside them.
 
-Re-running appends. With `resume: true` (the default) item ids already in the
-output file are skipped, so an interrupted run costs the record in flight and
-nothing else. `--no-resume` re-scrapes everything.
+### Storage modes
+
+Re-running appends. What happens to a listing the file already knows depends on
+`store_mode`, and the choice decides whether you end up with a catalogue or a
+history:
+
+| Mode | Rows per listing | Use it for |
+| --- | --- | --- |
+| `observations` (default) | One per crawl | Price history, time-on-market, spotting a delisting |
+| `changes` | One per change | The same history for anything that moved, in a much smaller file |
+| `unique` | One, ever | A catalogue of current listings |
+
+```bash
+python -m bina_scraper crawl --mode changes -o data/listings.jsonl
+```
+
+`observations` records a row every crawl even when nothing moved, which is the
+point: "this listing was still live at this price on this date" is a fact you
+cannot recover later. `changes` drops those rows, so the file stays small and a
+price history is still complete — but you can no longer tell an unchanged
+listing from one you never checked.
+
+`unique` is the cheapest and the only mode that saves requests: a listing
+already in the file is never fetched again. The history modes have to fetch
+before they can tell whether anything changed, so they cost one request per
+listing per crawl. Budget for that before pointing a cron job at it.
+
+Every record carries a `content_hash` over the listing's own fields — the crawl
+timestamp and the view counter are excluded, since both move on their own and
+would make every observation look like a change. That hash is what `changes`
+mode compares, and it makes diffing two observations downstream a string
+comparison.
+
+`resume: true` (the default) reads the existing file's state on startup;
+`--no-resume` ignores it, which in `unique` mode re-scrapes everything and in
+`changes` mode makes the next write count as a change.
+
+### Reading the log back
+
+```bash
+python -m bina_scraper history data/listings.jsonl                    # summary
+python -m bina_scraper history data/listings.jsonl --item 4471693     # one timeline
+python -m bina_scraper history data/listings.jsonl --price-changes    # every move
+```
+
+```
+$ python -m bina_scraper history data/listings.jsonl --item 4471693
+4471693  (3 observations)
+  3 otaqlı yeni tikili
+  2025-09-13T06:00:04+00:00      185,000 AZN
+  2025-09-14T06:00:11+00:00      179,000 AZN   [price, content changed]
+  2025-09-15T06:00:07+00:00      179,000 AZN
+
+$ python -m bina_scraper history data/listings.jsonl --price-changes
+4471693  185,000 → 179,000 AZN  (-6,000, -3.2%)  on 2025-09-14T06:00:11+00:00
+```
+
+Add `--json` to any of those for machine-readable output. A price that becomes
+`"Razılaşma ilə"` (on request) parses to `null` and is not reported as a drop
+to zero.
 
 ## Being a good citizen
 
@@ -195,8 +253,8 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-97 tests run offline against HTML fixtures in `tests/fixtures/`; no test touches
-the network. The fixtures deliberately include the awkward cases — a promoted
+123 tests run offline against HTML fixtures in `tests/fixtures/`; no test
+touches the network. The fixtures deliberately include the awkward cases — a promoted
 listing repeated on the page, an ad card with no item id, a land plot quoted in
 sot, a property row this project does not model, and a Cloudflare challenge body.
 
@@ -211,11 +269,12 @@ bina_scraper/
   config.py       # Settings dataclass, YAML + flag loading
   selectors.py    # every CSS selector and label mapping, in one place
   crawl.py        # the crawl loop: pages -> cards -> details -> JSONL
+  history.py      # reading an observation log back: timelines, price changes
   robots.py       # robots.txt policy
   verify.py       # the verify-selectors report
   fetchers/       # http.py (requests) and browser.py (Playwright)
   parse/          # listing.py, detail.py, normalize.py
-  store/          # jsonl.py
+  store/          # jsonl.py, and the three storage modes
 ```
 
 Adding a field is usually three edits: a field on `Listing` in `models.py`, a

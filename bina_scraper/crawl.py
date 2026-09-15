@@ -30,6 +30,7 @@ class CrawlStats:
     details_fetched: int = 0
     records_written: int = 0
     skipped_duplicates: int = 0
+    unchanged: int = 0
     errors: int = 0
     blocked: bool = False
 
@@ -37,7 +38,8 @@ class CrawlStats:
         return (
             f"pages={self.pages_fetched} cards={self.cards_seen} "
             f"details={self.details_fetched} written={self.records_written} "
-            f"dupes={self.skipped_duplicates} errors={self.errors}"
+            f"dupes={self.skipped_duplicates} unchanged={self.unchanged} "
+            f"errors={self.errors}"
             + (" BLOCKED" if self.blocked else "")
         )
 
@@ -72,7 +74,9 @@ class Crawler:
     def __init__(self, settings: Settings, fetcher: Fetcher | None = None, store: JsonlStore | None = None):
         self.settings = settings
         self.fetcher = fetcher or build_fetcher(settings)
-        self.store = store or JsonlStore(settings.output, resume=settings.resume)
+        self.store = store or JsonlStore(
+            settings.output, mode=settings.store_mode, resume=settings.resume
+        )
         self.robots = RobotsPolicy(
             settings.effective_user_agent(), enabled=settings.respect_robots
         )
@@ -201,7 +205,7 @@ class Crawler:
     def _process_stubs(self, stubs: list[ListingStub]) -> bool:
         """Write records for a page's cards. False means stop the crawl."""
         for stub in stubs:
-            if self.store.has(stub.item_id):
+            if not self.store.should_fetch(stub.item_id):
                 self.stats.skipped_duplicates += 1
                 continue
             if self.settings.max_items is not None and self.stats.records_written >= self.settings.max_items:
@@ -217,6 +221,8 @@ class Crawler:
 
             if self.store.write(listing.to_dict()):
                 self.stats.records_written += 1
+            elif self.store.mode == "changes":
+                self.stats.unchanged += 1
             else:
                 self.stats.skipped_duplicates += 1
         return True

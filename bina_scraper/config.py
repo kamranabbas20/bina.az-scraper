@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import selectors as sel
+from .store.jsonl import MODES
 
 DEFAULT_USER_AGENT = (
     "bina-az-scraper/0.1 (+https://github.com/kamranabbas20/bina.az-scraper; "
@@ -53,6 +54,11 @@ class Settings:
 
     # Output
     output: str = "data/listings.jsonl"
+    # How the output file treats a listing it has seen before:
+    #   observations - one row per listing per crawl (a history)
+    #   changes      - one row per listing per change (a smaller history)
+    #   unique       - one row per listing ever (a catalogue, no history)
+    store_mode: str = "observations"
     seen_file: str | None = None
     resume: bool = True
     save_html_dir: str | None = None
@@ -88,6 +94,10 @@ class Settings:
         self.search_url_path()
         if self.fetcher not in {"http", "browser"}:
             raise ValueError(f"unknown fetcher {self.fetcher!r}; expected 'http' or 'browser'")
+        if self.store_mode not in MODES:
+            raise ValueError(
+                f"unknown store_mode {self.store_mode!r}; expected one of {list(MODES)}"
+            )
         if self.delay < 0 or self.jitter < 0:
             raise ValueError("delay and jitter must be >= 0")
         if self.max_pages < 1:

@@ -3,8 +3,19 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
+
+# Fields left out of a listing's fingerprint. These move on their own between
+# crawls, so including them would report every listing as changed and make the
+# "changes" store mode no smaller than a full observation log.
+FINGERPRINT_EXCLUDE = frozenset({"scraped_at", "content_hash", "view_count"})
+
+# Keys inside .properties that the scraper writes itself rather than reading
+# off the page; bumping SELECTOR_REVISION must not look like a price change.
+FINGERPRINT_EXCLUDE_PROPERTIES = frozenset({"_selector_revision", "_source"})
 
 
 @dataclass(slots=True)
@@ -74,7 +85,34 @@ class Listing:
     # dropped when bina.az adds a property we do not model yet.
     properties: dict[str, str] = field(default_factory=dict)
 
+    # Digest of the fields above that describe the listing rather than the
+    # crawl. Two observations of one listing share it iff nothing changed.
+    content_hash: str | None = None
+
+    def fingerprint(self) -> str:
+        """Stable digest of the listing's own content.
+
+        Used to tell one observation of an unchanged listing from a real
+        change. Excludes the crawl timestamp and the view counter, which move
+        on every crawl on their own.
+        """
+        payload = {
+            key: value
+            for key, value in dataclasses.asdict(self).items()
+            if key not in FINGERPRINT_EXCLUDE
+        }
+        payload["properties"] = {
+            key: value
+            for key, value in self.properties.items()
+            if key not in FINGERPRINT_EXCLUDE_PROPERTIES
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:32]
+
     def to_dict(self) -> dict[str, Any]:
+        """Serialise, filling in the content hash if it is not set yet."""
+        if self.content_hash is None:
+            self.content_hash = self.fingerprint()
         return dataclasses.asdict(self)
 
     def merge_stub(self, stub: ListingStub) -> None:

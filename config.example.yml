@@ -32,7 +32,18 @@ respect_robots: true
 
 # --- output -----------------------------------------------------------------
 output: data/listings.jsonl
-resume: true               # skip item ids already present in the output file
+
+# What the output file does with a listing it has seen before:
+#   observations - one row per listing per crawl. A price history, and proof a
+#                  listing was still live on a given date. Grows every crawl.
+#   changes      - one row per listing per change. Same history for anything
+#                  that moved, much smaller, but an unchanged listing leaves
+#                  no trace of having been checked.
+#   unique       - one row per listing ever. A catalogue; keeps the first price
+#                  it saw and discards every later one.
+store_mode: observations
+
+resume: true               # read what the output file already holds
 save_html_dir: null        # keep raw HTML here too, for selector repair
 
 # --- browser fetcher only ---------------------------------------------------
